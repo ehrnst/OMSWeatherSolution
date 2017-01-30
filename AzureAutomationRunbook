@@ -107,12 +107,8 @@ Function Get-OpenWeatherMapData {
 Get-OpenWeatherMapData
 
 Uses openweathermap.com api to get weather data and inserts in to OMS log analytics
-Version 0.1 October 2016
+Version 1.0 January 2017
 Created by Cameron Fuller & Martin Ehrnst
-
-BUG:
-Current version does not support sending data from multiple cities.
-Main suspect is the data returned from OpenWeatherMap which seems to return the first city twice. We look in to this and update when fixed - suggestions?
 
 #>
 
