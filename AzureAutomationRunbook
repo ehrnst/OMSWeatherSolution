@@ -1,0 +1,204 @@
+<#
+
+    .DESCRIPTION
+    OMS weather Solution - track weather forecast and observations within MSOMS
+
+    Usage and Configuration:
+    There are one config region per function. This script can get data from OpenweatherMap or Norwegian YR.no (not only norwegian locations)
+    Edit each config area to fit your own environment.
+    Script is intended to run in azure atuomation. You will have to create runbook assets to use this script
+    If you want to run in another automation tool or on your own computer, please change the general variables
+
+    In the end of the script. Comment out the function you do not want to use.
+
+    .NOTES
+    Version 1.5
+
+    Martin Ehrnst /adatum.no /@ehrnst
+    Cameron Fuller, Catapult systems /@cfullerMVP
+
+    .CHANGELOG
+    30.01.2017 v.1.5:
+    Fixed multiple location issue for Open Weather Map.
+    Thanks to 'jowildes' (blog comment) pointed out that there was some incorrect bracket placements causing the trouble
+    Minor code changes
+
+    October 2016 v1.1 
+    (Initial release)
+
+#>
+
+#region General variables
+$customerId = Get-AutomationVariable -Name 'CustomerID'
+$SharedKey = Get-AutomationVariable -Name 'SharedKey'
+$OpenWeatherMapKey = Get-AutomationVariable -Name 'OpenWeatherMapKey'
+$time = [DATETIME]::Now
+#endregion
+
+#region OpenWeathermap Config
+$Citys = '3137115', '2643743', '1880252' #Get your City ID from Open Weather Map URL
+$Unit = 'Metric' #chose between Metric, Imperial or Kelvin
+$OpenLog = "OpenWeather" #setting log type for OpenWeatherMap
+#endregion
+
+#region YRno Config
+$URLs = 'http://www.yr.no/place/Norge/Rogaland/Stavanger/Stavanger/forecast.xml', 
+'http://www.yr.no/place/Norge/Hordaland/Bergen/Bergen/forecast.xml', 
+'http://www.yr.no/place/norge/oslo/oslo/oslo/forecast.xml',
+'http://www.yr.no/place/USA/New_York/New_York/forecast.xml',
+'http://www.yr.no/place/Storbritannia/England/London/forecast.xml'
+$YRLog = "YRno" #setting the log type for YRno
+#endregion
+
+function Get-YrWeatherData{
+<#
+Get-YrWeatherData
+uses yr.no xml api to get loaction forcasted and observed temperature.
+Result is converted to Json and originally created for OMS data collector API
+
+Version 1 September 2016
+Martin Ehrnst /Adatum.no
+
+NOTE: YR.no does not have observations for all locations.
+#>
+
+
+param(
+    [Parameter(Mandatory = $false)]
+    [string[]]$locationURL
+)
+
+if (!$locationURL){
+    $locationURL = 'http://yr.no/place/Norway/Oslo/Oslo/Oslo/forecast.xml'} #default URL to Oslo, Norway
+#Create a table to accept multiple locations
+    $weatherTable = @()
+foreach ($url in $locationurl){   
+    [xml]$yr = Invoke-WebRequest -Uri $URL -UseBasicParsing
+    [string]$locationName = $yr.weatherdata.location.name
+#Getting the forcasted temperature
+    [int]$ForecastTemp = $yr.SelectNodes("//forecast").tabular.time.temperature.value | Select-Object -First 1
+    [int]$Forecastprecipitation = $yr.SelectNodes("//forecast").tabular.time.precipitation.value | Select-Object -First 1
+    [int]$observedtemp = $yr.SelectNodes("//observations").weatherstation.temperature.value | Select-Object -First 1
+    [string]$observedVindName = $yr.SelectNodes("//observations").weatherstation.windSpeed.name | Select-Object -First 1
+    [string]$observedVindDirectioName = $yr.SelectNodes("//observations").weatherstation.windDirection.name | Select-Object -First 1
+
+#Output
+
+$weatherData = @{
+    'LocationName' = $locationName
+    'ForecastedTemp' = $ForecastTemp
+    'Precipitation' = $Forecastprecipitation
+    'ObservedTemp' = $observedtemp
+    'WindDirection' = $observedVindDirectioName
+    'Wind' = $observedVindName
+    }
+
+#add location weather data to our table
+$weatherTable +=$weatherData
+
+}
+#Convert data to Json accepted by OMS
+$weathertable  | ConvertTo-Json
+}
+
+Function Get-OpenWeatherMapData {
+
+<#
+Get-OpenWeatherMapData
+
+Uses openweathermap.com api to get weather data and inserts in to OMS log analytics
+Version 0.1 October 2016
+Created by Cameron Fuller & Martin Ehrnst
+
+BUG:
+Current version does not support sending data from multiple cities.
+Main suspect is the data returned from OpenWeatherMap which seems to return the first city twice. We look in to this and update when fixed - suggestions?
+
+#>
+
+Param ($OpenWeatherMapKey, $Citys)
+$weatherTable = @()
+Foreach ($city in $Citys){
+
+    $GetWeather = Invoke-RestMethod -uri "api.openweathermap.org/data/2.5/weather?id=$City&APPID=$OpenWeatherMapKey&units=$Unit"
+
+    [String]$City = $GetWeather.name
+    [String]$WeatherDescription = $GetWeather.weather.description
+    [int]$Temp = $GetWeather.main.temp
+    [int]$WindSpeed = $GetWeather.wind.speed
+    [int]$BarometricPressure = $GetWeather.main.pressure
+    [int]$Humidity = $GetWeather.main.humidity
+
+    #Output
+    $weatherData = @{
+    'City' = $city
+    'Temp' = $Temp
+    'Humidity' = $Humidity
+    'WindSpeed' = $WindSpeed
+    'BarometricPressure' = $BarometricPressure 
+    'Description' = $WeatherDescription
+    }
+
+    #add location weather data to our table
+    $weatherTable +=$weatherData
+    }
+    #Convert data to Json accepted by OMS
+    $weathertable  | ConvertTo-Json
+}
+#End Function
+# Function to create the authorization signature - TECHNET example
+Function New-Signature ($customerId, $sharedKey, $date, $contentLength, $method, $contentType, $resource)
+{
+  $xHeaders = 'x-ms-date:' + $date
+  $stringToHash = $method + "`n" + $contentLength + "`n" + $contentType + "`n" + $xHeaders + "`n" + $resource
+
+  $bytesToHash = [Text.Encoding]::UTF8.GetBytes($stringToHash)
+  $keyBytes = [Convert]::FromBase64String($sharedKey)
+
+  $sha256 = New-Object -TypeName System.Security.Cryptography.HMACSHA256
+  $sha256.Key = $keyBytes
+  $calculatedHash = $sha256.ComputeHash($bytesToHash)
+  $encodedHash = [Convert]::ToBase64String($calculatedHash)
+  $authorization = 'SharedKey {0}:{1}' -f $customerId, $encodedHash
+  return $authorization
+}
+
+#Send data to OMS - a technet example
+Function Send-OMSData($customerId, $sharedKey, $body, $logType)
+{
+  $method = 'POST'
+  $contentType = 'application/json'
+  $resource = '/api/logs'
+  $rfc1123date = [DateTime]::UtcNow.ToString('r')
+  $contentLength = $body.Length
+  $signature = New-Signature `
+  -customerId $customerId `
+  -sharedKey $sharedKey `
+  -date $rfc1123date `
+  -contentLength $contentLength `
+  -fileName $fileName `
+  -method $method `
+  -contentType $contentType `
+  -resource $resource
+  $uri = 'https://' + $customerId + '.ods.opinsights.azure.com' + $resource + '?api-version=2016-04-01'
+
+  $headers = @{
+    'Authorization'      = $signature
+    'Log-Type'           = $logType
+    'x-ms-date'          = $rfc1123date
+    'time-generated-field' = $time
+  }
+
+  $response = Invoke-WebRequest -Uri $uri -Method $method -ContentType $contentType -Headers $headers -Body $body -UseBasicParsing
+  return $response.StatusCode
+}
+
+
+$YRdata = Get-YrWeatherData -locationURL $URLs
+Send-OMSData -customerId $customerId -sharedKey $sharedKey -body ([System.Text.Encoding]::UTF8.GetBytes($YRdata)) -logType $YRlog
+$YRdata
+
+
+$Opendata = Get-OpenWeatherMapData -OpenWeatherMapKey $OpenWeatherMapKey -Citys $Citys
+Send-OMSData -customerId $customerId -sharedKey $sharedKey -body ([System.Text.Encoding]::UTF8.GetBytes($Opendata)) -logType $OpenLog
+$Opendata
